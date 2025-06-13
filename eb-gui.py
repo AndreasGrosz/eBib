@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 eb-gui.py - Grafische Suchoberfläche für die eBib-Datenbank
-Mit MD5-Duplikat-Filterung, robuster TSV-Behandlung und Dark Mode
+Mit MD5-Duplikat-Filterung, robuster TSV-Behandlung, Dark Mode und Datums-Referenz-Filter
 """
 
 import tkinter as tk
@@ -23,11 +23,45 @@ except ImportError:
     # Fallback falls eb.py nicht verfügbar
     INPUT_FILE = '/media/synology/files/projekte/kd0089 my eBib & DMS/Compare-n-Share/s_250518-list-of-all-files-in-eBib-HDD-v032.tsv'
     OUTPUT_DIR = Path.home() / 'Downloads'
+    # ERWEITERTE TAG_DEFS basierend auf Extension-Analyse
     TAG_DEFS = {
-        "#text": {"pdf", "doc", "docx", "txt", "djvu", "odt"},
-        "#audio": {"mp3", "wav", "flac", "ogg", "m4a"},
-        "#image": {"jpg", "jpeg", "png", "gif", "bmp", "svg", "tiff"},
+        "#text": {
+            # Bestehende
+            "pdf", "doc", "docx", "txt", "djvu", "odt", "rtf", "html", "htm", "epub", "mobi", "tex", "md", "chm",
+            # Neue aus Analyse
+            "shtml", "mht", "url", "memo", "wps", "hlp", "man", "info", "rst",
+            # Spreadsheets
+            "ods", "xls", "xlsx", "csv", "tsv"
+        },
+        "#audio": {
+            # Bestehende
+            "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "mp2", "ra", "au", "mid", "midi",
+            # Neue aus Analyse (besonders wichtig: frf mit 5.532 Dateien!)
+            "frf", "m3u", "ram", "aiff", "cda"
+        },
+        "#graphik": {
+            # Bestehende
+            "jpg", "jpeg", "png", "gif", "bmp", "svg", "tiff", "tif", "webp", "ico", "psd", "raw", "cr2", "nef",
+            # Neue aus Analyse
+            "pcx", "emz", "thm", "eps", "wmf", "emf", "pct", "pic"
+        },
+        "#video": {
+            # Bestehende
+            "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v", "3gp", "ogv", "rm", "asf", "vob",
+            # Neue aus Analyse
+            "bup", "ifo", "mpg", "mpeg", "divx", "xvid", "ogm"
+        }
     }
+
+# Import des neuen Datums-Filter-Moduls
+try:
+    from date_filter import DateReferenceFilter, filter_tsv_rows_by_date
+    HAS_DATE_FILTER = True
+except ImportError:
+    # KEIN Fallback - Fehler sofort sichtbar machen
+    print("FEHLER: date_filter.py nicht gefunden!")
+    print("Bitte stellen Sie sicher, dass date_filter.py im gleichen Verzeichnis liegt.")
+    sys.exit(1)
 
 FIELD_MAP = {
     "datum": 0,
@@ -45,9 +79,25 @@ FIELD_ALIASES = {
 class EBibGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("eBib Search GUI - Mit Duplikat-Filter")
-        self.root.geometry("1000x900")  # Noch größer
-        self.root.minsize(900, 800)     # Größeres Minimum
+        self.root.title("eBib Search GUI - Mit Duplikat-Filter und Datums-Referenz")
+        self.root.geometry("1000x700")  # Noch kleiner: 700 statt 800
+        self.root.minsize(900, 700)     # Kleineres Minimum
+
+        # Fenster beim Start maximieren - PLATTFORM-SICHER
+        try:
+            # Versuche verschiedene Maximierungs-Methoden
+            self.root.state('zoomed')  # Linux/Windows
+        except tk.TclError:
+            try:
+                self.root.wm_state('zoomed')  # Alternative
+            except tk.TclError:
+                try:
+                    # macOS/andere Systeme
+                    self.root.attributes('-zoomed', True)
+                except tk.TclError:
+                    # Fallback: Manuelle Maximierung
+                    self.root.geometry(f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0")
+                    print("[INFO] Fenster manuell maximiert (zoomed nicht unterstützt)")
 
         # Dark Mode Styling
         self.setup_dark_theme()
@@ -57,7 +107,17 @@ class EBibGUI:
         self.search_thread = None
         self.found_rows = []
 
+        # Neue Variable für Datums-Filter
+        self.current_date_filter = None
+
+        # Lokaler Cache für bessere Performance
+        self.local_cache_file = Path('/tmp/ebib_cache.tsv')
+        self.cache_valid = False
+
         self.setup_ui()
+
+        # Cache beim Start prüfen/erstellen
+        self.init_cache()
 
     def setup_dark_theme(self):
         """Konfiguriert sehr dunkles Theme für bessere Lesbarkeit bei grauem Star"""
@@ -319,8 +379,101 @@ class EBibGUI:
         self.root.bind('<Control-Return>', lambda e: self.start_search())
         self.root.bind('<F5>', lambda e: self.start_search())
 
+        # Tab-Wechsel mit Page Up/Down
+        self.root.bind('<Prior>', lambda e: self.switch_to_tab(0))  # Page Up -> Einfache Suche
+        self.root.bind('<Next>', lambda e: self.switch_to_tab(1))   # Page Down -> Erweiterte Suche
+
         # Escape zum Stoppen
         self.root.bind('<Escape>', lambda e: self.stop_search() if self.search_running else None)
+
+    def init_cache(self):
+        """Initialisiert den lokalen Cache beim Start"""
+        if not os.path.exists(INPUT_FILE):
+            self.status_label.config(text=f"❌ Input-Datei nicht gefunden: {INPUT_FILE}")
+            return
+
+        # Prüfe ob Cache existiert und aktuell ist
+        need_update = True
+        if self.local_cache_file.exists():
+            try:
+                cache_mtime = os.path.getmtime(self.local_cache_file)
+                source_mtime = os.path.getmtime(INPUT_FILE)
+
+                # Cache ist gültig wenn er neuer ist als die Quelldatei
+                if cache_mtime >= source_mtime:
+                    need_update = False
+                    self.cache_valid = True
+                    self.status_label.config(text="✅ Lokaler Cache ist aktuell - bereit für schnelle Suche")
+                    print(f"[INFO] Verwende aktuellen Cache: {self.local_cache_file}")
+            except Exception as e:
+                print(f"[WARN] Cache-Prüfung fehlgeschlagen: {e}")
+
+        if need_update:
+            self.update_cache()
+
+    def update_cache(self):
+        """Kopiert die NAS-Datei in lokalen Cache"""
+        try:
+            self.status_label.config(text="📋 Erstelle lokalen Cache für bessere Performance...")
+            self.root.update()
+
+            print(f"[INFO] Kopiere {INPUT_FILE} nach {self.local_cache_file}")
+
+            # Erstelle /tmp Verzeichnis falls nicht vorhanden
+            self.local_cache_file.parent.mkdir(exist_ok=True)
+
+            # Kopiere Datei mit Progress
+            import shutil
+            file_size = os.path.getsize(INPUT_FILE)
+
+            with open(INPUT_FILE, 'rb') as src, open(self.local_cache_file, 'wb') as dst:
+                copied = 0
+                chunk_size = 1024 * 1024  # 1MB Chunks
+
+                while True:
+                    chunk = src.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    dst.write(chunk)
+                    copied += len(chunk)
+
+                    # Progress anzeigen
+                    if file_size > 0:
+                        progress = (copied / file_size) * 100
+                        self.status_label.config(text=f"📋 Cache-Update: {progress:.1f}%")
+                        self.root.update()
+
+            self.cache_valid = True
+            self.status_label.config(text="✅ Cache erstellt - bereit für schnelle Suche")
+            print(f"[INFO] Cache erfolgreich erstellt: {self.local_cache_file}")
+
+        except Exception as e:
+            error_msg = f"Fehler beim Cache-Update: {e}"
+            self.status_label.config(text=f"⚠️ Cache-Fehler: {error_msg}")
+            print(f"[ERROR] {error_msg}")
+            # Fallback: Verwende Original-Datei
+            self.cache_valid = False
+
+    def get_input_file(self):
+        """Gibt die zu verwendende Input-Datei zurück (Cache oder Original)"""
+        if self.cache_valid and self.local_cache_file.exists():
+            return str(self.local_cache_file)
+        else:
+            return INPUT_FILE
+
+    def switch_to_tab(self, tab_index):
+        """Wechselt zwischen den Tabs (0=Einfach, 1=Erweitert)"""
+        try:
+            # Finde das Notebook Widget
+            for widget in self.root.winfo_children():
+                for child in widget.winfo_children():
+                    if isinstance(child, ttk.Notebook):
+                        if tab_index < len(child.tabs()):
+                            child.select(tab_index)
+                        return
+        except Exception as e:
+            print(f"[DEBUG] Tab-Wechsel fehlgeschlagen: {e}")
 
     def setup_simple_search(self):
         """Einfache Suche mit einem Textfeld"""
@@ -346,9 +499,18 @@ class EBibGUI:
         # Fokus auf Suchfeld setzen
         search_entry.focus_set()
 
+        # **NEUE ERGÄNZUNG: Datums-Referenz-Filter**
+        if HAS_DATE_FILTER:
+            self.date_filter = DateReferenceFilter(
+                self.simple_frame,
+                self.colors,
+                row=2,  # Position nach Suchfeld
+                filter_callback=self.on_date_filter_change
+            )
+
         # Datei-Typ Filter
         type_frame = tk.Frame(self.simple_frame, bg=self.colors['bg'], relief='solid', bd=1)
-        type_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        type_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
 
         # Titel für Dateityp Filter
         type_title = tk.Label(type_frame, text="Dateityp Filter",
@@ -357,23 +519,26 @@ class EBibGUI:
         type_title.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(5, 10), padx=5)
 
         self.type_vars = {}
-        self.type_vars['all'] = tk.BooleanVar(value=True)
-        self.type_vars['text'] = tk.BooleanVar()
+        self.type_vars['text'] = tk.BooleanVar(value=True)  # Text als Standard
         self.type_vars['audio'] = tk.BooleanVar()
-        self.type_vars['image'] = tk.BooleanVar()
+        self.type_vars['graphik'] = tk.BooleanVar()
+        self.type_vars['video'] = tk.BooleanVar()
+        self.type_vars['sonstige'] = tk.BooleanVar()
 
-        ttk.Checkbutton(type_frame, text="Alle Dateien", variable=self.type_vars['all'],
-                       command=self.on_all_types_toggle).grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        ttk.Checkbutton(type_frame, text="📄 Text (PDF, DOC, TXT...)",
-                       variable=self.type_vars['text']).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Checkbutton(type_frame, text="🎵 Audio (MP3, WAV...)",
-                       variable=self.type_vars['audio']).grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
-        ttk.Checkbutton(type_frame, text="🖼️ Bilder (JPG, PNG...)",
-                       variable=self.type_vars['image']).grid(row=1, column=3, sticky=tk.W, padx=5, pady=5)
+        ttk.Checkbutton(type_frame, text="📄 Text (PDF, DOC, HTML...)",
+                       variable=self.type_vars['text']).grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Checkbutton(type_frame, text="🎵 Audio (MP3, WAV, FRF...)",
+                       variable=self.type_vars['audio']).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Checkbutton(type_frame, text="🖼️ Graphik (JPG, PNG, PCX...)",
+                       variable=self.type_vars['graphik']).grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
+        ttk.Checkbutton(type_frame, text="🎬 Video (MP4, AVI, BUP...)",
+                       variable=self.type_vars['video']).grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Checkbutton(type_frame, text="📋 Sonstige",
+                       variable=self.type_vars['sonstige']).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
 
         # Beispiele
         examples_frame = tk.Frame(self.simple_frame, bg=self.colors['bg'], relief='solid', bd=1)
-        examples_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        examples_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
 
         # Titel für Beispiele
         examples_title = tk.Label(examples_frame, text="Beispiele",
@@ -515,7 +680,7 @@ class EBibGUI:
         self.year_from_var = tk.StringVar()
         self.year_to_var = tk.StringVar()
 
-        # Labels mit dunklem Hintergrund
+        # Labels auf eine Zeile
         year_from_label = tk.Label(year_frame, text="Von Jahr:",
                                   bg=self.colors['bg'], fg=self.colors['fg'])
         year_from_label.grid(row=1, column=0, sticky=tk.W, pady=2, padx=5)
@@ -535,9 +700,17 @@ class EBibGUI:
                              font=('Arial', 8))
         help_label.grid(row=1, column=4, sticky=tk.W, padx=(10,0), pady=2)
 
+        if HAS_DATE_FILTER:
+            self.date_filter_advanced = DateReferenceFilter(
+                self.advanced_frame,
+                self.colors,
+                row=2,  # Position nach Jahr-Filter (kompakter)
+                filter_callback=self.on_date_filter_change
+            )
+
         # Ausschluss-Bedingungen
         not_frame = tk.Frame(self.advanced_frame, bg=self.colors['bg'], relief='solid', bd=1)
-        not_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5, padx=5)
+        not_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5, padx=5)
 
         # Titel für Ausschluss
         not_title = tk.Label(not_frame, text="Ausschließen (darf NICHT enthalten sein)",
@@ -547,7 +720,7 @@ class EBibGUI:
 
         self.not_var = tk.StringVar()
 
-        # Label mit dunklem Hintergrund
+        # Label mit dunklem Hintergrund - auf einer Zeile
         not_label = tk.Label(not_frame, text="Ausschließen:",
                             bg=self.colors['bg'], fg=self.colors['fg'])
         not_label.grid(row=1, column=0, sticky=tk.W, pady=2, padx=5)
@@ -560,6 +733,24 @@ class EBibGUI:
         and_frame.columnconfigure(2, weight=1)
         or_frame.columnconfigure(2, weight=1)
         not_frame.columnconfigure(1, weight=1)
+
+    def on_date_filter_change(self, parsed_date, original_input):
+        """
+        Callback für Änderungen im Datums-Filter
+
+        Args:
+            parsed_date: datetime-Objekt oder None
+            original_input: Original-Eingabe des Benutzers
+        """
+        self.current_date_filter = parsed_date
+
+        if parsed_date:
+            iso_date = parsed_date.strftime("%Y-%m-%d")
+            self.status_label.config(text=f"Datums-Filter aktiv: {iso_date}")
+        else:
+            if hasattr(self, 'current_date_filter') and self.current_date_filter is not None:
+                self.status_label.config(text="Datums-Filter entfernt")
+            self.current_date_filter = None
 
     def on_field_change(self, idx, entry_type):
         """Handler für Feldtyp-Änderungen - zeigt passende Eingabe-Widgets"""
@@ -579,11 +770,8 @@ class EBibGUI:
             entry['value_entry'].grid(row=0, column=0, sticky=(tk.W, tk.E))
 
     def on_all_types_toggle(self):
-        """Handler für 'Alle Dateien' Checkbox"""
-        if self.type_vars['all'].get():
-            self.type_vars['text'].set(False)
-            self.type_vars['audio'].set(False)
-            self.type_vars['image'].set(False)
+        """Handler für Dateityp-Checkboxen - Entfernt da keine 'Alle' Option mehr existiert"""
+        pass  # Nicht mehr benötigt ohne "Alle Dateien" Option
 
     def parse_tsv_line_robust(self, line):
         """Robustes Parsen einer TSV-Zeile mit doppelten Tabs"""
@@ -600,20 +788,73 @@ class EBibGUI:
         return parts[:8]  # Nur die ersten 8 Spalten verwenden
 
     def line_matches_query(self, line, query_expr):
-        """Einfache und robuste Text-Suche - OHNE komplexe Filter"""
+        """Einfache und robuste Text-Suche - MIT Datums-Filter UND Dateityp-Filter"""
         if len(line) < 5:
             return False
 
-        # Wenn keine Suche eingegeben, alles durchlassen
+        # **DATUMS-FILTER: Zuerst Datum prüfen**
+        if self.current_date_filter is not None:
+            row_date = line[0].strip()  # Spalte 0 ist date-of-work
+            target_iso = self.current_date_filter.strftime("%Y-%m-%d")
+
+            # Exakter Vergleich mit dem ISO-Datum
+            if not row_date.startswith(target_iso):
+                return False  # Datum stimmt nicht überein
+
+        # **DATEITYP-FILTER: Prüfe Dateiendung - OHNE "Alle" Option**
+        any_type_selected = any([
+            self.type_vars['text'].get(),
+            self.type_vars['audio'].get(),
+            self.type_vars['graphik'].get(),
+            self.type_vars['video'].get(),
+            self.type_vars['sonstige'].get()
+        ])
+
+        if any_type_selected:
+            # Mindestens ein spezifischer Typ ist gewählt
+            file_ext = line[4].lower() if len(line) > 4 else ""  # Spalte 4 ist extension
+
+            type_match = False
+
+            if self.type_vars['text'].get():
+                if file_ext in TAG_DEFS["#text"]:
+                    type_match = True
+
+            if self.type_vars['audio'].get():
+                if file_ext in TAG_DEFS["#audio"]:
+                    type_match = True
+
+            if self.type_vars['graphik'].get():
+                if file_ext in TAG_DEFS["#graphik"]:
+                    type_match = True
+
+            if self.type_vars['video'].get():
+                if file_ext in TAG_DEFS["#video"]:
+                    type_match = True
+
+            if self.type_vars['sonstige'].get():
+                # Alle Extensions die NICHT in den anderen Kategorien sind
+                all_known_exts = set()
+                for tag_set in TAG_DEFS.values():
+                    all_known_exts.update(tag_set)
+
+                if file_ext not in all_known_exts:
+                    type_match = True
+
+            if not type_match:
+                return False  # Dateityp stimmt nicht überein
+
+        # **TEXT-SUCHE: Falls Suchbegriff eingegeben - NUR DATEINAME**
         if not query_expr.strip():
+            # Kein Suchbegriff, aber evtl. andere Filter aktiv
             return True
 
-        # Einfache Textsuche: Alle Suchbegriffe müssen vorkommen
+        # KORRIGIERT: Suche nur im Dateinamen (Spalte 3), nicht in ganzer Zeile
         search_terms = query_expr.lower().split()
-        searchable_text = f"{line[3]} {line[2]} {line[4]}".lower()
+        filename_text = line[3].lower() if len(line) > 3 else ""  # Nur Spalte 3: filename
 
-        # ALLE Begriffe müssen im Text vorkommen
-        return all(term in searchable_text for term in search_terms)
+        # ALLE Begriffe müssen im Dateinamen vorkommen
+        return all(term in filename_text for term in search_terms)
 
     def build_query_from_gui(self):
         """Erstellt Query-String aus GUI-Eingaben - VEREINFACHT"""
@@ -691,18 +932,35 @@ class EBibGUI:
         return unique_rows, duplicates_count
 
     def start_search(self):
-        """Startet die Suche in einem separaten Thread"""
+        """Startet die Suche in einem separaten Thread - ERWEITERT"""
         if self.search_running:
             self.stop_search()
             return
 
         query = self.build_query_from_gui()
-        if not query:
-            messagebox.showwarning("Keine Eingabe", "Bitte geben Sie einen Suchbegriff ein.")
+
+        # Prüfe ob mindestens ein Filter aktiv ist
+        has_text_query = bool(query.strip())
+        has_date_filter = self.current_date_filter is not None
+        has_type_filter = any([
+            self.type_vars['text'].get(),
+            self.type_vars['audio'].get(),
+            self.type_vars['graphik'].get(),
+            self.type_vars['video'].get(),
+            self.type_vars['sonstige'].get()
+        ])
+
+        if not has_text_query and not has_date_filter and not has_type_filter:
+            messagebox.showwarning("Keine Eingabe", "Bitte geben Sie einen Suchbegriff ein oder setzen Sie einen Filter.")
             return
 
         # Debug-Info anzeigen
         print(f"[DEBUG] Starte Suche mit Query: '{query}'")
+        if has_date_filter:
+            print(f"[DEBUG] Datums-Filter aktiv: {self.current_date_filter.strftime('%Y-%m-%d')}")
+        if has_type_filter:
+            active_types = [k for k, v in self.type_vars.items() if k != 'all' and v.get()]
+            print(f"[DEBUG] Dateityp-Filter aktiv: {active_types}")
 
         self.search_running = True
         self.search_button.config(text="⏹️ STOPPEN", bg='#d73527')  # Rot für Stop
@@ -711,9 +969,19 @@ class EBibGUI:
         self.results_text.delete(1.0, tk.END)
 
         # Sofort Feedback geben
-        self.status_label.config(text=f"Starte Suche nach: '{query}'...")
-        self.results_text.insert(tk.END, f"🔍 Suche nach: '{query}'\n")
-        self.results_text.insert(tk.END, f"📁 Durchsuche Datei: {INPUT_FILE}\n\n")
+        filter_info = []
+        if has_text_query:
+            filter_info.append(f"Text: '{query}'")
+        if has_date_filter:
+            filter_info.append(f"Datum: {self.current_date_filter.strftime('%Y-%m-%d')}")
+        if has_type_filter:
+            active_types = [k.capitalize() for k, v in self.type_vars.items() if v.get()]
+            filter_info.append(f"Typ: {'+'.join(active_types)}")
+
+        filter_text = " + ".join(filter_info)
+        self.status_label.config(text=f"Starte Suche mit: {filter_text}")
+        self.results_text.insert(tk.END, f"🔍 Suche mit: {filter_text}\n")
+        self.results_text.insert(tk.END, f"📁 Verwende: {'Cache' if self.cache_valid else 'NAS'} ({self.get_input_file()})\n\n")
 
         # Suche in separatem Thread starten
         self.search_thread = threading.Thread(target=self.perform_search, args=(query,))
@@ -730,20 +998,24 @@ class EBibGUI:
     def perform_search(self, query):
         """Führt die eigentliche Suche durch - VEREINFACHT"""
         try:
-            self.root.after(0, lambda q=query: self.status_label.config(text=f"Suche nach: {q}"))
-            self.root.after(0, lambda q=query: self.results_text.insert(tk.END, f"🔍 Suche nach: '{q}'\n"))
-            self.root.after(0, lambda: self.results_text.insert(tk.END, f"📊 Einfache Text-Suche (alle Begriffe müssen vorkommen)\n\n"))
+            self.root.after(0, lambda q=query: self.status_label.config(text=f"Suche mit: {filter_text}"))
+            self.root.after(0, lambda q=query: self.results_text.insert(tk.END, f"🔍 Kombinierte Suche: {filter_text}\n"))
+
+            # Verwende lokalen Cache für bessere Performance
+            input_file = self.get_input_file()
+            cache_info = "Cache" if input_file == str(self.local_cache_file) else "NAS"
+            self.root.after(0, lambda: self.results_text.insert(tk.END, f"📊 Durchsuche {cache_info}: {input_file}\n\n"))
 
             # Prüfe ob Input-Datei existiert
-            if not os.path.exists(INPUT_FILE):
-                self.root.after(0, lambda: self.search_error(f"Input-Datei nicht gefunden: {INPUT_FILE}"))
+            if not os.path.exists(input_file):
+                self.root.after(0, lambda: self.search_error(f"Input-Datei nicht gefunden: {input_file}"))
                 return
 
             # Suche durchführen
             found_rows = []
             row_count = 0
 
-            with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+            with open(input_file, 'r', encoding='utf-8') as f:
                 for line_num, line in enumerate(f, 1):
                     if not self.search_running:
                         break
@@ -794,6 +1066,52 @@ class EBibGUI:
             print(f"[ERROR] {error_msg}")  # Debug-Ausgabe
             self.root.after(0, lambda msg=error_msg: self.search_error(msg))
 
+    def create_meaningful_filename(self, query, has_date_filter, has_type_filter):
+        """Erstellt sprechenden Dateinamen basierend auf Suchparametern"""
+        parts = ["ebib"]
+
+        # Suchbegriff hinzufügen (bereinigt)
+        if query.strip():
+            clean_query = re.sub(r'[^\w\-_]', '_', query.strip())
+            clean_query = clean_query[:20]  # Max 20 Zeichen
+            parts.append(clean_query)
+
+        # Datums-Filter hinzufügen
+        if has_date_filter:
+            date_str = self.current_date_filter.strftime("%Y%m%d")
+            parts.append(f"date_{date_str}")
+
+        # Dateityp-Filter hinzufügen
+        if has_type_filter:
+            active_types = []
+            if self.type_vars['text'].get():
+                active_types.append("text")
+            if self.type_vars['audio'].get():
+                active_types.append("audio")
+            if self.type_vars['graphik'].get():
+                active_types.append("graphik")
+            if self.type_vars['video'].get():
+                active_types.append("video")
+            if self.type_vars['sonstige'].get():
+                active_types.append("sonstige")
+
+            if active_types:
+                types_str = "+".join(active_types)
+                parts.append(f"type_{types_str}")
+
+        # Fallback: Timestamp wenn nichts spezifisches
+        if len(parts) == 1:  # Nur "ebib"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            parts.append(timestamp)
+
+        filename = "-".join(parts) + ".ods"
+
+        # Dateiname kürzen falls zu lang
+        if len(filename) > 100:
+            filename = filename[:97] + ".ods"
+
+        return filename
+
     def create_ods_file(self, query, original_count, duplicates_removed):
         """Erstellt die ODS-Datei mit Hyperlinks"""
         try:
@@ -801,17 +1119,29 @@ class EBibGUI:
 
             # Temporäre TSV-Datei erstellen
             temp_file = Path('/tmp/ebib-gui-search.tsv')
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.output_file = Path(OUTPUT_DIR) / f'ebib-search-{timestamp}.ods'
+
+            # Sprechenden Dateinamen erstellen
+            has_date_filter = self.current_date_filter is not None
+            has_type_filter = any([
+                self.type_vars['text'].get(),
+                self.type_vars['audio'].get(),
+                self.type_vars['graphik'].get(),
+                self.type_vars['video'].get(),
+                self.type_vars['sonstige'].get()
+            ])
+
+            filename = self.create_meaningful_filename(query, has_date_filter, has_type_filter)
+            self.output_file = Path(OUTPUT_DIR) / filename
 
             with open(temp_file, 'w', encoding='utf-8') as f:
                 for row in self.found_rows:
                     f.write('\t'.join(row) + '\n')
 
-            # ODS erstellen
+            # ODS erstellen mit fixierter Kopfzeile
             try:
                 from eb import create_ods_with_hyperlinks
-                create_ods_with_hyperlinks(temp_file, self.output_file, query, use_filter=False)
+                # Erweiterte ODS-Erstellung mit fixierter Kopfzeile
+                self.create_enhanced_ods(temp_file, self.output_file, query)
             except ImportError:
                 # Fallback: Einfache ODS-Erstellung
                 self.create_simple_ods(self.output_file)
@@ -823,6 +1153,87 @@ class EBibGUI:
         except Exception as e:
             error_msg = f"Fehler beim Erstellen der ODS-Datei: {str(e)}"
             self.root.after(0, lambda msg=error_msg: self.search_error(msg))
+
+    def create_enhanced_ods(self, temp_file, output_file, query):
+        """Erstellt ODS mit fixierter Kopfzeile und Hyperlinks"""
+        try:
+            from odf.opendocument import OpenDocumentSpreadsheet
+            from odf.table import Table, TableRow, TableCell
+            from odf.text import P
+            from odf.style import Style, TableProperties, TableRowProperties, TableCellProperties
+            from odf import teletype
+
+            # Neues ODS-Dokument erstellen
+            doc = OpenDocumentSpreadsheet()
+
+            # Styles für Kopfzeile erstellen
+            header_style = Style(name="HeaderStyle", family="table-cell")
+            header_style.addElement(TableCellProperties(
+                backgroundcolor="#4a9eff",
+                border="0.05cm solid #000000"
+            ))
+            doc.styles.addElement(header_style)
+
+            # Tabelle erstellen
+            table = Table(name="eBib Suchergebnisse")
+
+            # Kopfzeile
+            headers = ["Datum", "Hyperlink", "Pfad", "Dateiname", "Extension", "Größe", "Datum", "MD5"]
+            header_row = TableRow()
+
+            for header in headers:
+                cell = TableCell(stylename="HeaderStyle")
+                cell.addElement(P(text=header))
+                header_row.addElement(cell)
+
+            table.addElement(header_row)
+
+            # Kopfzeile fixieren
+            try:
+                from odf.table import TableHeaderRows
+                header_rows = TableHeaderRows()
+                header_rows.addElement(header_row)
+                table.addElement(header_rows)
+            except ImportError:
+                # Falls TableHeaderRows nicht verfügbar, normale Tabelle
+                pass
+
+            # Datenzeilen hinzufügen
+            for row_data in self.found_rows:
+                row = TableRow()
+                for i, cell_data in enumerate(row_data):
+                    cell = TableCell()
+                    if i == 1:  # Hyperlink-Spalte
+                        # Entferne führendes = für echte Hyperlinks und erstelle klickbaren Link
+                        hyperlink_text = str(cell_data).lstrip('=')
+                        if hyperlink_text.startswith('HYPERLINK('):
+                            # Extrahiere URL aus HYPERLINK-Formel
+                            import re
+                            match = re.search(r'"file:///(.*?)"', hyperlink_text)
+                            if match:
+                                file_path = match.group(1)
+                                # Erstelle echten Hyperlink
+                                from odf.text import A
+                                link = A(href=f"file:///{file_path}", text=file_path)
+                                p = P()
+                                p.addElement(link)
+                                cell.addElement(p)
+                            else:
+                                cell.addElement(P(text=hyperlink_text))
+                        else:
+                            cell.addElement(P(text=hyperlink_text))
+                    else:
+                        cell.addElement(P(text=str(cell_data)))
+                    row.addElement(cell)
+                table.addElement(row)
+
+            doc.spreadsheet.addElement(table)
+            doc.save(str(output_file))
+
+        except ImportError:
+            # Fallback zur ursprünglichen Methode
+            from eb import create_ods_with_hyperlinks
+            create_ods_with_hyperlinks(temp_file, output_file, query, use_filter=False)
 
     def create_simple_ods(self, output_file):
         """Fallback: Einfache ODS-Erstellung ohne externe Abhängigkeiten"""
@@ -836,20 +1247,54 @@ class EBibGUI:
         self.output_file = csv_file
 
     def search_completed(self, result_count, original_count, duplicates_removed):
-        """Wird aufgerufen wenn die Suche abgeschlossen ist"""
+        """Wird aufgerufen wenn die Suche abgeschlossen ist - ERWEITERT"""
         self.search_running = False
         self.search_button.config(text="🔍 SUCHE STARTEN", bg=self.colors['highlight'])
         self.progress.stop()
 
         if result_count > 0:
-            self.status_label.config(text=f"✅ Suche abgeschlossen: {result_count:,} eindeutige Ergebnisse")
+            # **ERWEITERTE STATUS-MELDUNG mit ALLEN Filter-Infos**
+            filter_info = []
+            current_query = self.build_query_from_gui()
+            if current_query.strip():
+                filter_info.append(f"Text: '{current_query.strip()}'")
+            if self.current_date_filter:
+                date_str = self.current_date_filter.strftime("%Y-%m-%d")
+                filter_info.append(f"Datum: {date_str}")
 
-            # Statistiken anzeigen
+            # Dateityp-Filter Info
+            if any([self.type_vars['text'].get(), self.type_vars['audio'].get(),
+                   self.type_vars['graphik'].get(), self.type_vars['video'].get(),
+                   self.type_vars['sonstige'].get()]):
+                active_types = []
+                if self.type_vars['text'].get():
+                    active_types.append("Text")
+                if self.type_vars['audio'].get():
+                    active_types.append("Audio")
+                if self.type_vars['graphik'].get():
+                    active_types.append("Graphik")
+                if self.type_vars['video'].get():
+                    active_types.append("Video")
+                if self.type_vars['sonstige'].get():
+                    active_types.append("Sonstige")
+                if active_types:
+                    filter_info.append(f"Typ: {'+'.join(active_types)}")
+
+            filter_text = " | ".join(filter_info) if filter_info else "keine Filter"
+            self.status_label.config(text=f"✅ Suche abgeschlossen: {result_count:,} Ergebnisse ({filter_text})")
+
+            # **ERWEITERTE Statistiken mit ALLEN Filter-Infos**
             stats_text = f"\n📊 STATISTIKEN:\n"
             stats_text += f"   • Gefundene Dateien: {original_count:,}\n"
             if duplicates_removed > 0:
                 stats_text += f"   • Duplikate entfernt: {duplicates_removed:,}\n"
-            stats_text += f"   • Eindeutige Dateien: {result_count:,}\n\n"
+            stats_text += f"   • Eindeutige Dateien: {result_count:,}\n"
+
+            # ALLE Filter-Infos hinzufügen
+            if filter_info:
+                stats_text += f"   • Aktive Filter: {', '.join(filter_info)}\n"
+
+            stats_text += "\n"
 
             self.results_text.insert(tk.END, stats_text)
 
@@ -866,7 +1311,7 @@ class EBibGUI:
             self.results_text.insert(tk.END, f"\n💾 Ergebnisse gespeichert in: {self.output_file}\n")
             self.results_text.insert(tk.END, f"👆 Klicken Sie auf '📊 CALC ÖFFNEN' zum Anzeigen\n")
 
-            # Button aktivieren
+            # Button aktivieren - KRITISCH für CALC-ÖFFNEN!
             self.open_button.config(state='normal', bg=self.colors['highlight'])
 
         else:
@@ -943,10 +1388,26 @@ class EBibGUI:
             messagebox.showerror("Fehler", error_msg)
             print(f"[ERROR] {error_msg}")
 
+
 def main():
-    root = tk.Tk()
-    app = EBibGUI(root)
-    root.mainloop()
+    """Hauptfunktion - startet die GUI"""
+    try:
+        root = tk.Tk()
+        app = EBibGUI(root)
+
+        # Debug-Info
+        print("eBib GUI gestartet")
+        print(f"INPUT_FILE: {INPUT_FILE}")
+        print(f"OUTPUT_DIR: {OUTPUT_DIR}")
+        print(f"HAS_DATE_FILTER: {HAS_DATE_FILTER}")
+        print(f"Cache-Datei: {app.local_cache_file}")
+
+        root.mainloop()
+    except Exception as e:
+        print(f"FEHLER beim Starten der GUI: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()
