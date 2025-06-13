@@ -14,7 +14,7 @@ from collections import defaultdict
 import time
 
 INPUT_FILE = '/media/synology/files/projekte/kd0089 my eBib & DMS/Compare-n-Share/s_250518-list-of-all-files-in-eBib-HDD-v032.tsv'
-PROCESSED_DB = os.environ.get('EBIB_SQLITE_PATH', '/home/res/Documents/ebib_search.db')
+PROCESSED_DB = os.environ.get('EBIB_SQLITE_PATH', Path.home() / '/Documents/ebib_search.db')
 
 def parse_tsv_line_robust(line):
     """Robustes TSV-Parsing"""
