@@ -1212,45 +1212,64 @@ class EBibGUI:
             self.root.after(0, lambda msg=error_msg: self.search_error(msg))
 
     def create_enhanced_ods(self, temp_file, output_file, query):
-        """Erstellt ODS mit fixierter Kopfzeile, Spaltenbreiten und Hyperlinks"""
+        """Erstellt ODS mit fixierter Kopfzeile, korrekten Spaltenbreiten und Hyperlinks"""
         try:
             from odf.opendocument import OpenDocumentSpreadsheet
             from odf.table import Table, TableRow, TableCell, TableColumn
-            from odf.text import P
+            from odf.text import P, A
             from odf.style import Style, TableProperties, TableRowProperties, TableCellProperties, TableColumnProperties
-            from odf import teletype
+            from odf.number import NumberStyle, Number
 
             # Neues ODS-Dokument erstellen
             doc = OpenDocumentSpreadsheet()
 
-            # Spalten-Styles für verschiedene Breiten
-            col_styles = []
-            col_widths = ["3cm", "8cm", "12cm", "6cm", "2cm", "3cm", "3cm", "8cm"]  # Spaltenbreiten
+            # KORREKTE Spaltenbreiten wie gewünscht
+            column_widths = ["2.25cm", "2.25cm", "2.25cm", "12cm", "1cm", "2cm", "1cm", "2cm"]
 
-            for i, width in enumerate(col_widths):
+            # Spalten-Styles für verschiedene Breiten - KORREKT erstellen
+            col_styles = []
+            for i, width in enumerate(column_widths):
                 col_style = Style(name=f"col{i}", family="table-column")
                 col_style.addElement(TableColumnProperties(columnwidth=width))
-                doc.styles.addElement(col_style)
+                doc.automaticstyles.addElement(col_style)  # WICHTIG: zu automaticstyles hinzufügen
                 col_styles.append(col_style)
 
-            # Styles für Kopfzeile erstellen
+            # Style für fixierte Kopfzeile erstellen
             header_style = Style(name="HeaderStyle", family="table-cell")
             header_style.addElement(TableCellProperties(
                 backgroundcolor="#4a9eff",
-                border="0.05cm solid #000000"
+                border="0.05cm solid #000000",
+                padding="0.1cm"
             ))
-            doc.styles.addElement(header_style)
+            doc.automaticstyles.addElement(header_style)  # WICHTIG: zu automaticstyles
+
+            # Style für normale Zellen
+            cell_style = Style(name="CellStyle", family="table-cell")
+            cell_style.addElement(TableCellProperties(
+                border="0.02cm solid #cccccc",
+                padding="0.05cm"
+            ))
+            doc.automaticstyles.addElement(cell_style)  # WICHTIG: zu automaticstyles
+
+            # Style für Hyperlink-Zellen (etwas breiter)
+            link_style = Style(name="LinkStyle", family="table-cell")
+            link_style.addElement(TableCellProperties(
+                border="0.02cm solid #cccccc",
+                padding="0.05cm"
+            ))
+            doc.automaticstyles.addElement(link_style)  # WICHTIG: zu automaticstyles
 
             # Tabelle erstellen
             table = Table(name="eBib Suchergebnisse")
 
-            # Spalten mit Breiten definieren
-            for col_style in col_styles:
-                col = TableColumn(stylename=col_style)
+            # WICHTIG: Spalten mit korrekten Breiten definieren - EXPLIZIT zuweisen
+            for i, col_style in enumerate(col_styles):
+                col = TableColumn(stylename=col_style.getAttribute("name"))
                 table.addElement(col)
+                print(f"[DEBUG] Spalte {i}: {column_widths[i]} Style: {col_style.getAttribute('name')}")
 
-            # Kopfzeile
-            headers = ["Datum", "Hyperlink", "Pfad", "Dateiname", "Extension", "Größe", "Datum", "MD5"]
+            # Kopfzeile mit korrekten deutschen Bezeichnungen
+            headers = ["DocDatum", "Hyperlink", "Pfad", "Dateiname", "ext", "Größe", "Datum", "md5"]
             header_row = TableRow()
 
             for header in headers:
@@ -1260,42 +1279,84 @@ class EBibGUI:
 
             table.addElement(header_row)
 
-            # Datenzeilen hinzufügen (OHNE number-rows-repeated!)
+            # Datenzeilen hinzufügen
             for row_data in self.found_rows:
-                row = TableRow()  # KEIN Attribut hier!
+                row = TableRow()
+
                 for i, cell_data in enumerate(row_data):
-                    cell = TableCell()
+                    # Wähle passenden Style
                     if i == 1:  # Hyperlink-Spalte
-                        # Entferne führendes = für echte Hyperlinks und erstelle klickbaren Link
-                        hyperlink_text = str(cell_data).lstrip('=')
-                        if hyperlink_text.startswith('HYPERLINK('):
-                            # Extrahiere URL aus HYPERLINK-Formel
-                            import re
-                            match = re.search(r'"file:///(.*?)"', hyperlink_text)
-                            if match:
-                                file_path = match.group(1)
-                                # Erstelle echten Hyperlink
-                                from odf.text import A
-                                link = A(href=f"file:///{file_path}", text=file_path)
-                                p = P()
-                                p.addElement(link)
-                                cell.addElement(p)
-                            else:
-                                cell.addElement(P(text=hyperlink_text))
+                        cell = TableCell(stylename="LinkStyle")
+                    else:
+                        cell = TableCell(stylename="CellStyle")
+
+                    # Spezielle Behandlung für Hyperlink-Spalte
+                    if i == 1:  # Hyperlink-Spalte
+                        hyperlink_text = str(cell_data).strip()
+
+                        # WICHTIG: Hyperlink-Formel BEHALTEN für LibreOffice
+                        if hyperlink_text.startswith('=HYPERLINK('):
+                            # LibreOffice erwartet die Formel MIT dem führenden =
+                            from odf.table import CellAddress
+                            # Setze die Formel direkt
+                            cell.setAttribute("formula", hyperlink_text)
+                            # Zusätzlich auch als Text für Anzeige
+                            cell.addElement(P(text=hyperlink_text))
                         else:
+                            # Kein Hyperlink, normaler Text
                             cell.addElement(P(text=hyperlink_text))
                     else:
-                        cell.addElement(P(text=str(cell_data)))
+                        # Normale Zelle
+                        cell_text = str(cell_data) if cell_data is not None else ""
+                        cell.addElement(P(text=cell_text))
+
                     row.addElement(cell)
+
                 table.addElement(row)
 
+            # Tabelle zum Dokument hinzufügen
             doc.spreadsheet.addElement(table)
-            doc.save(str(output_file))
 
-        except ImportError:
+            # KRITISCH: Fixierte Kopfzeile - KORREKTE Methode für LibreOffice
+            try:
+                # LibreOffice verwendet spezielle Tabellen-Eigenschaften für fixierte Bereiche
+                from odf.table import TableHeaderRows, TableHeaderColumns
+
+                # Erstelle Header-Rows Element für die Kopfzeile
+                header_rows = TableHeaderRows()
+
+                # Verschiebe die bereits erstellte Kopfzeile in die Header-Sektion
+                table.removeChild(header_row)  # Entferne aus normaler Position
+                header_rows.addElement(header_row)  # Füge zu Header-Rows hinzu
+                table.insertBefore(header_rows, table.firstChild)  # Füge am Anfang der Tabelle ein
+
+                print("[INFO] Fixierte Kopfzeile aktiviert")
+
+            except Exception as e:
+                print(f"[WARNING] Konnte fixierte Kopfzeile nicht setzen: {e}")
+                # Falls Header-Manipulation fehlschlägt, Kopfzeile normal belassen
+                pass
+
+            # Dokument speichern
+            doc.save(str(output_file))
+            print(f"[INFO] ODS erstellt mit {len(self.found_rows)} Zeilen: {output_file}")
+
+        except ImportError as e:
+            print(f"[WARNING] ODF-Library nicht verfügbar: {e}")
             # Fallback zur ursprünglichen Methode
-            from eb import create_ods_with_hyperlinks
-            create_ods_with_hyperlinks(temp_file, output_file, query, use_filter=False)
+            try:
+                from eb import create_ods_with_hyperlinks
+                create_ods_with_hyperlinks(temp_file, output_file, query, use_filter=False)
+            except ImportError:
+                # Letzter Fallback: CSV erstellen
+                self.create_simple_ods(output_file)
+
+        except Exception as e:
+            print(f"[ERROR] Fehler beim Erstellen der ODS-Datei: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback
+            self.create_simple_ods(output_file)
 
     def create_simple_ods(self, output_file):
         """Fallback: Einfache ODS-Erstellung ohne externe Abhängigkeiten"""
