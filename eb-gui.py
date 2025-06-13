@@ -15,6 +15,8 @@ import sys
 from datetime import datetime
 import re
 from collections import defaultdict
+import sqlite3
+import time
 
 # Import der bestehenden eBib-Funktionalität
 try:
@@ -63,6 +65,9 @@ except ImportError:
     print("Bitte stellen Sie sicher, dass date_filter.py im gleichen Verzeichnis liegt.")
     sys.exit(1)
 
+# SQLite-DB für Performance
+SQLITE_DB = '/tmp/ebib_search.db'
+
 FIELD_MAP = {
     "datum": 0,
     "name": 3,
@@ -110,14 +115,14 @@ class EBibGUI:
         # Neue Variable für Datums-Filter
         self.current_date_filter = None
 
-        # Lokaler Cache für bessere Performance
-        self.local_cache_file = Path('/tmp/ebib_cache.tsv')
-        self.cache_valid = False
+        # Lokaler Cache für bessere Performance (jetzt SQLite)
+        self.sqlite_db = SQLITE_DB
+        self.db_ready = False
 
         self.setup_ui()
 
-        # Cache beim Start prüfen/erstellen
-        self.init_cache()
+        # SQLite-DB beim Start prüfen
+        self.init_sqlite_db()
 
     def setup_dark_theme(self):
         """Konfiguriert sehr dunkles Theme für bessere Lesbarkeit bei grauem Star"""
@@ -386,81 +391,95 @@ class EBibGUI:
         # Escape zum Stoppen
         self.root.bind('<Escape>', lambda e: self.stop_search() if self.search_running else None)
 
-    def init_cache(self):
-        """Initialisiert den lokalen Cache beim Start"""
-        if not os.path.exists(INPUT_FILE):
-            self.status_label.config(text=f"❌ Input-Datei nicht gefunden: {INPUT_FILE}")
+    def init_sqlite_db(self):
+        """Prüft SQLite-DB beim Start"""
+        if not os.path.exists(self.sqlite_db):
+            self.status_label.config(text="❌ SQLite-DB nicht gefunden. Bitte erst ebib_preprocessor.py ausführen!")
+            self.db_ready = False
+            print(f"[ERROR] SQLite-DB nicht gefunden: {self.sqlite_db}")
+            print("Bitte führen Sie zuerst 'python ebib_preprocessor.py' aus!")
             return
 
-        # Prüfe ob Cache existiert und aktuell ist
-        need_update = True
-        if self.local_cache_file.exists():
-            try:
-                cache_mtime = os.path.getmtime(self.local_cache_file)
-                source_mtime = os.path.getmtime(INPUT_FILE)
-
-                # Cache ist gültig wenn er neuer ist als die Quelldatei
-                if cache_mtime >= source_mtime:
-                    need_update = False
-                    self.cache_valid = True
-                    self.status_label.config(text="✅ Lokaler Cache ist aktuell - bereit für schnelle Suche")
-                    print(f"[INFO] Verwende aktuellen Cache: {self.local_cache_file}")
-            except Exception as e:
-                print(f"[WARN] Cache-Prüfung fehlgeschlagen: {e}")
-
-        if need_update:
-            self.update_cache()
-
-    def update_cache(self):
-        """Kopiert die NAS-Datei in lokalen Cache"""
         try:
-            self.status_label.config(text="📋 Erstelle lokalen Cache für bessere Performance...")
-            self.root.update()
+            # Test-Verbindung
+            conn = sqlite3.connect(self.sqlite_db)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM files")
+            record_count = cursor.fetchone()[0]
+            conn.close()
 
-            print(f"[INFO] Kopiere {INPUT_FILE} nach {self.local_cache_file}")
-
-            # Erstelle /tmp Verzeichnis falls nicht vorhanden
-            self.local_cache_file.parent.mkdir(exist_ok=True)
-
-            # Kopiere Datei mit Progress
-            import shutil
-            file_size = os.path.getsize(INPUT_FILE)
-
-            with open(INPUT_FILE, 'rb') as src, open(self.local_cache_file, 'wb') as dst:
-                copied = 0
-                chunk_size = 1024 * 1024  # 1MB Chunks
-
-                while True:
-                    chunk = src.read(chunk_size)
-                    if not chunk:
-                        break
-
-                    dst.write(chunk)
-                    copied += len(chunk)
-
-                    # Progress anzeigen
-                    if file_size > 0:
-                        progress = (copied / file_size) * 100
-                        self.status_label.config(text=f"📋 Cache-Update: {progress:.1f}%")
-                        self.root.update()
-
-            self.cache_valid = True
-            self.status_label.config(text="✅ Cache erstellt - bereit für schnelle Suche")
-            print(f"[INFO] Cache erfolgreich erstellt: {self.local_cache_file}")
+            self.db_ready = True
+            self.status_label.config(text=f"✅ SQLite-DB bereit - {record_count:,} Records für ultra-schnelle Suche")
+            print(f"[INFO] SQLite-DB geladen: {record_count:,} Records")
 
         except Exception as e:
-            error_msg = f"Fehler beim Cache-Update: {e}"
-            self.status_label.config(text=f"⚠️ Cache-Fehler: {error_msg}")
-            print(f"[ERROR] {error_msg}")
-            # Fallback: Verwende Original-Datei
-            self.cache_valid = False
+            self.status_label.config(text=f"❌ SQLite-DB Fehler: {e}")
+            self.db_ready = False
+            print(f"[ERROR] SQLite-DB Fehler: {e}")
 
-    def get_input_file(self):
-        """Gibt die zu verwendende Input-Datei zurück (Cache oder Original)"""
-        if self.cache_valid and self.local_cache_file.exists():
-            return str(self.local_cache_file)
+    def search_sqlite(self, query, has_date_filter, has_type_filter):
+        """Ultra-schnelle SQLite-Suche"""
+        if not self.db_ready:
+            return []
+
+        conn = sqlite3.connect(self.sqlite_db)
+        cursor = conn.cursor()
+
+        # SQL-Query dynamisch aufbauen
+        conditions = []
+        params = []
+
+        # Text-Suche (falls vorhanden)
+        if query.strip():
+            conditions.append("filename_lower LIKE ?")
+            params.append(f"%{query.lower()}%")
+
+        # Datums-Filter
+        if has_date_filter and self.current_date_filter:
+            date_str = self.current_date_filter.strftime("%Y-%m-%d")
+            conditions.append("date_of_work LIKE ?")
+            params.append(f"{date_str}%")
+
+        # Dateityp-Filter
+        if has_type_filter:
+            type_conditions = []
+            if self.type_vars['text'].get():
+                type_conditions.append("file_type = 'text'")
+            if self.type_vars['audio'].get():
+                type_conditions.append("file_type = 'audio'")
+            if self.type_vars['graphik'].get():
+                type_conditions.append("file_type = 'graphik'")
+            if self.type_vars['video'].get():
+                type_conditions.append("file_type = 'video'")
+            if self.type_vars['sonstige'].get():
+                type_conditions.append("file_type = 'sonstige'")
+
+            if type_conditions:
+                conditions.append(f"({' OR '.join(type_conditions)})")
+
+        # SQL zusammensetzen
+        base_query = """
+            SELECT date_of_work, link, path, filename, extension, size, date, hash
+            FROM files
+        """
+
+        if conditions:
+            sql = base_query + " WHERE " + " AND ".join(conditions)
         else:
-            return INPUT_FILE
+            sql = base_query
+
+        # Limit für Performance
+        sql += " LIMIT 50000"
+
+        start_time = time.time()
+        cursor.execute(sql, params)
+        results = cursor.fetchall()
+        query_time = (time.time() - start_time) * 1000
+
+        conn.close()
+
+        print(f"[DEBUG] SQLite-Query: {len(results)} Ergebnisse in {query_time:.1f}ms")
+        return results
 
     def switch_to_tab(self, tab_index):
         """Wechselt zwischen den Tabs (0=Einfach, 1=Erweitert)"""
@@ -788,73 +807,10 @@ class EBibGUI:
         return parts[:8]  # Nur die ersten 8 Spalten verwenden
 
     def line_matches_query(self, line, query_expr):
-        """Einfache und robuste Text-Suche - MIT Datums-Filter UND Dateityp-Filter"""
-        if len(line) < 5:
-            return False
-
-        # **DATUMS-FILTER: Zuerst Datum prüfen**
-        if self.current_date_filter is not None:
-            row_date = line[0].strip()  # Spalte 0 ist date-of-work
-            target_iso = self.current_date_filter.strftime("%Y-%m-%d")
-
-            # Exakter Vergleich mit dem ISO-Datum
-            if not row_date.startswith(target_iso):
-                return False  # Datum stimmt nicht überein
-
-        # **DATEITYP-FILTER: Prüfe Dateiendung - OHNE "Alle" Option**
-        any_type_selected = any([
-            self.type_vars['text'].get(),
-            self.type_vars['audio'].get(),
-            self.type_vars['graphik'].get(),
-            self.type_vars['video'].get(),
-            self.type_vars['sonstige'].get()
-        ])
-
-        if any_type_selected:
-            # Mindestens ein spezifischer Typ ist gewählt
-            file_ext = line[4].lower() if len(line) > 4 else ""  # Spalte 4 ist extension
-
-            type_match = False
-
-            if self.type_vars['text'].get():
-                if file_ext in TAG_DEFS["#text"]:
-                    type_match = True
-
-            if self.type_vars['audio'].get():
-                if file_ext in TAG_DEFS["#audio"]:
-                    type_match = True
-
-            if self.type_vars['graphik'].get():
-                if file_ext in TAG_DEFS["#graphik"]:
-                    type_match = True
-
-            if self.type_vars['video'].get():
-                if file_ext in TAG_DEFS["#video"]:
-                    type_match = True
-
-            if self.type_vars['sonstige'].get():
-                # Alle Extensions die NICHT in den anderen Kategorien sind
-                all_known_exts = set()
-                for tag_set in TAG_DEFS.values():
-                    all_known_exts.update(tag_set)
-
-                if file_ext not in all_known_exts:
-                    type_match = True
-
-            if not type_match:
-                return False  # Dateityp stimmt nicht überein
-
-        # **TEXT-SUCHE: Falls Suchbegriff eingegeben - NUR DATEINAME**
-        if not query_expr.strip():
-            # Kein Suchbegriff, aber evtl. andere Filter aktiv
-            return True
-
-        # KORRIGIERT: Suche nur im Dateinamen (Spalte 3), nicht in ganzer Zeile
-        search_terms = query_expr.lower().split()
-        filename_text = line[3].lower() if len(line) > 3 else ""  # Nur Spalte 3: filename
-
-        # ALLE Begriffe müssen im Dateinamen vorkommen
-        return all(term in filename_text for term in search_terms)
+        """Wird nicht mehr verwendet - SQLite macht die Filterung"""
+        # Diese Methode wird bei SQLite nicht mehr benötigt
+        # Bleibt nur für Kompatibilität
+        return True
 
     def build_query_from_gui(self):
         """Erstellt Query-String aus GUI-Eingaben - VEREINFACHT"""
@@ -981,7 +937,7 @@ class EBibGUI:
         filter_text = " + ".join(filter_info)
         self.status_label.config(text=f"Starte Suche mit: {filter_text}")
         self.results_text.insert(tk.END, f"🔍 Suche mit: {filter_text}\n")
-        self.results_text.insert(tk.END, f"📁 Verwende: {'Cache' if self.cache_valid else 'NAS'} ({self.get_input_file()})\n\n")
+        self.results_text.insert(tk.END, f"🚀 SQLite-DB bereit\n\n")
 
         # Suche in separatem Thread starten
         self.search_thread = threading.Thread(target=self.perform_search, args=(query,))
@@ -996,50 +952,108 @@ class EBibGUI:
         self.status_label.config(text="Suche gestoppt")
 
     def perform_search(self, query):
-        """Führt die eigentliche Suche durch - VEREINFACHT"""
+        """Führt die eigentliche Suche durch - KORRIGIERT für SQLite"""
         try:
-            self.root.after(0, lambda q=query: self.status_label.config(text=f"Suche mit: {filter_text}"))
-            self.root.after(0, lambda q=query: self.results_text.insert(tk.END, f"🔍 Kombinierte Suche: {filter_text}\n"))
+            # Filter-Informationen sammeln
+            has_text_query = bool(query.strip())
+            has_date_filter = self.current_date_filter is not None
+            has_type_filter = any([
+                self.type_vars['text'].get(),
+                self.type_vars['audio'].get(),
+                self.type_vars['graphik'].get(),
+                self.type_vars['video'].get(),
+                self.type_vars['sonstige'].get()
+            ])
 
-            # Verwende lokalen Cache für bessere Performance
-            input_file = self.get_input_file()
-            cache_info = "Cache" if input_file == str(self.local_cache_file) else "NAS"
-            self.root.after(0, lambda: self.results_text.insert(tk.END, f"📊 Durchsuche {cache_info}: {input_file}\n\n"))
+            # Filter-Text für Anzeige erstellen
+            filter_info = []
+            if has_text_query:
+                filter_info.append(f"Text: '{query}'")
+            if has_date_filter:
+                filter_info.append(f"Datum: {self.current_date_filter.strftime('%Y-%m-%d')}")
+            if has_type_filter:
+                active_types = [k.capitalize() for k, v in self.type_vars.items() if v.get()]
+                filter_info.append(f"Typ: {'+'.join(active_types)}")
 
-            # Prüfe ob Input-Datei existiert
-            if not os.path.exists(input_file):
-                self.root.after(0, lambda: self.search_error(f"Input-Datei nicht gefunden: {input_file}"))
-                return
+            filter_text = " + ".join(filter_info)
 
-            # Suche durchführen
-            found_rows = []
-            row_count = 0
+            self.root.after(0, lambda: self.status_label.config(text=f"Suche mit: {filter_text}"))
+            self.root.after(0, lambda: self.results_text.insert(tk.END, f"🔍 Kombinierte Suche: {filter_text}\n"))
 
-            with open(input_file, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
+            # SQLite-Suche verwenden wenn verfügbar
+            if self.db_ready:
+                self.root.after(0, lambda: self.results_text.insert(tk.END, f"⚡ Ultra-schnelle SQLite-Suche\n\n"))
+
+                # SQLite-Suche durchführen
+                start_time = time.time()
+                sqlite_results = self.search_sqlite(query, has_date_filter, has_type_filter)
+                search_time = (time.time() - start_time) * 1000
+
+                self.root.after(0, lambda: self.status_label.config(text=f"SQLite-Suche: {len(sqlite_results)} Ergebnisse in {search_time:.1f}ms"))
+
+                # SQLite-Ergebnisse in das erwartete Format konvertieren
+                found_rows = []
+                for row in sqlite_results:
+                    # SQLite: date_of_work, link, path, filename, extension, size, date, hash
+                    # TSV:    datum, hyperlink, pfad, name, ext, größe, datum, md5
+                    converted_row = [
+                        row[0],  # date_of_work -> datum
+                        row[1],  # link -> hyperlink
+                        row[2],  # path -> pfad
+                        row[3],  # filename -> name
+                        row[4],  # extension -> ext
+                        str(row[5]) if row[5] else "",  # size -> größe
+                        row[6],  # date -> datum
+                        row[7]   # hash -> md5
+                    ]
+                    found_rows.append(converted_row)
+
+                # Zeige erste Treffer sofort an
+                for i, row in enumerate(found_rows[:5]):
                     if not self.search_running:
                         break
+                    date_str = row[0][:10] if len(row[0]) >= 10 else row[0]
+                    self.root.after(0, lambda r=row, d=date_str:
+                                self.results_text.insert(tk.END, f"✓ {d} - {r[3]}\n"))
 
-                    row_count += 1
-                    if row_count % 10000 == 0:
-                        self.root.after(0, lambda c=row_count: self.status_label.config(text=f"Verarbeitet: {c:,} Zeilen"))
-                        if row_count % 50000 == 0:  # Weniger häufige Updates
-                            self.root.after(0, lambda c=row_count: self.results_text.insert(tk.END, f"⏳ {c:,} Zeilen verarbeitet...\n"))
+            else:
+                # Fallback: TSV-Datei durchsuchen
+                self.root.after(0, lambda: self.results_text.insert(tk.END, f"📊 Durchsuche TSV-Datei: {INPUT_FILE}\n\n"))
 
-                    # Robustes TSV-Parsing
-                    try:
-                        row = self.parse_tsv_line_robust(line)
+                # Prüfe ob Input-Datei existiert
+                if not os.path.exists(INPUT_FILE):
+                    self.root.after(0, lambda: self.search_error(f"Input-Datei nicht gefunden: {INPUT_FILE}"))
+                    return
 
-                        if len(row) >= 4 and self.line_matches_query(row, query):
-                            found_rows.append(row)
-                            # Zeige erste paar Treffer sofort an
-                            if len(found_rows) <= 5:
-                                date_str = row[0][:10] if len(row[0]) >= 10 else row[0]
-                                self.root.after(0, lambda r=row, d=date_str:
-                                               self.results_text.insert(tk.END, f"✓ {d} - {r[3]}\n"))
-                    except Exception as e:
-                        # Zeile überspringen bei Parse-Fehlern
-                        continue
+                # TSV-Suche durchführen
+                found_rows = []
+                row_count = 0
+
+                with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+                    for line_num, line in enumerate(f, 1):
+                        if not self.search_running:
+                            break
+
+                        row_count += 1
+                        if row_count % 10000 == 0:
+                            self.root.after(0, lambda c=row_count: self.status_label.config(text=f"Verarbeitet: {c:,} Zeilen"))
+                            if row_count % 50000 == 0:
+                                self.root.after(0, lambda c=row_count: self.results_text.insert(tk.END, f"⏳ {c:,} Zeilen verarbeitet...\n"))
+
+                        # Robustes TSV-Parsing
+                        try:
+                            row = self.parse_tsv_line_robust(line)
+
+                            if len(row) >= 4 and self.matches_all_filters(row, query, has_date_filter, has_type_filter):
+                                found_rows.append(row)
+                                # Zeige erste paar Treffer sofort an
+                                if len(found_rows) <= 5:
+                                    date_str = row[0][:10] if len(row[0]) >= 10 else row[0]
+                                    self.root.after(0, lambda r=row, d=date_str:
+                                                self.results_text.insert(tk.END, f"✓ {d} - {r[3]}\n"))
+                        except Exception as e:
+                            # Zeile überspringen bei Parse-Fehlern
+                            continue
 
             if not self.search_running:
                 return
@@ -1057,14 +1071,57 @@ class EBibGUI:
 
             if found_rows:
                 self.root.after(0, lambda q=query, oc=original_count, dr=duplicates_removed:
-                              self.create_ods_file(q, oc, dr))
+                            self.create_ods_file(q, oc, dr))
             else:
                 self.root.after(0, lambda: self.search_completed(0, 0, 0))
 
         except Exception as e:
             error_msg = f"Fehler bei der Suche: {str(e)}"
-            print(f"[ERROR] {error_msg}")  # Debug-Ausgabe
+            print(f"[ERROR] {error_msg}")
+            import traceback
+            traceback.print_exc()
             self.root.after(0, lambda msg=error_msg: self.search_error(msg))
+
+
+    def matches_all_filters(self, row, query, has_date_filter, has_type_filter):
+        """Prüft ob eine Zeile alle Filter erfüllt (für TSV-Fallback)"""
+        # Text-Filter
+        if query.strip():
+            search_text = f"{row[2]} {row[3]}".lower()  # Pfad + Dateiname
+            if query.lower() not in search_text:
+                return False
+
+        # Datums-Filter
+        if has_date_filter and self.current_date_filter:
+            target_date = self.current_date_filter.strftime("%Y-%m-%d")
+            if not row[0].startswith(target_date):
+                return False
+
+        # Dateityp-Filter
+        if has_type_filter:
+            ext = row[4].lower() if len(row) > 4 else ""
+
+            type_matches = []
+            if self.type_vars['text'].get():
+                type_matches.append(ext in TAG_DEFS.get("#text", set()))
+            if self.type_vars['audio'].get():
+                type_matches.append(ext in TAG_DEFS.get("#audio", set()))
+            if self.type_vars['graphik'].get():
+                type_matches.append(ext in TAG_DEFS.get("#graphik", set()))
+            if self.type_vars['video'].get():
+                type_matches.append(ext in TAG_DEFS.get("#video", set()))
+            if self.type_vars['sonstige'].get():
+                # Sonstige = nicht in den anderen Kategorien
+                all_known_exts = set()
+                for tag_exts in TAG_DEFS.values():
+                    all_known_exts.update(tag_exts)
+                type_matches.append(ext not in all_known_exts)
+
+            # Mindestens ein Typ muss zutreffen
+            if not any(type_matches):
+                return False
+
+        return True
 
     def create_meaningful_filename(self, query, has_date_filter, has_type_filter):
         """Erstellt sprechenden Dateinamen basierend auf Suchparametern"""
@@ -1203,13 +1260,9 @@ class EBibGUI:
 
             table.addElement(header_row)
 
-            # WICHTIG: Kopfzeile als "wiederholte Zeile" markieren
-            # Das macht sie in LibreOffice fixiert
-            header_row.setAttribute("table:number-rows-repeated", "1")
-
-            # Datenzeilen hinzufügen
+            # Datenzeilen hinzufügen (OHNE number-rows-repeated!)
             for row_data in self.found_rows:
-                row = TableRow()
+                row = TableRow()  # KEIN Attribut hier!
                 for i, cell_data in enumerate(row_data):
                     cell = TableCell()
                     if i == 1:  # Hyperlink-Spalte
@@ -1409,7 +1462,7 @@ def main():
         print(f"INPUT_FILE: {INPUT_FILE}")
         print(f"OUTPUT_DIR: {OUTPUT_DIR}")
         print(f"HAS_DATE_FILTER: {HAS_DATE_FILTER}")
-        print(f"Cache-Datei: {app.local_cache_file}")
+        print(f"SQLite-DB: {app.sqlite_db}")
 
         root.mainloop()
     except Exception as e:
