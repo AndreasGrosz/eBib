@@ -1155,16 +1155,26 @@ class EBibGUI:
             self.root.after(0, lambda msg=error_msg: self.search_error(msg))
 
     def create_enhanced_ods(self, temp_file, output_file, query):
-        """Erstellt ODS mit fixierter Kopfzeile und Hyperlinks"""
+        """Erstellt ODS mit fixierter Kopfzeile, Spaltenbreiten und Hyperlinks"""
         try:
             from odf.opendocument import OpenDocumentSpreadsheet
-            from odf.table import Table, TableRow, TableCell
+            from odf.table import Table, TableRow, TableCell, TableColumn
             from odf.text import P
-            from odf.style import Style, TableProperties, TableRowProperties, TableCellProperties
+            from odf.style import Style, TableProperties, TableRowProperties, TableCellProperties, TableColumnProperties
             from odf import teletype
 
             # Neues ODS-Dokument erstellen
             doc = OpenDocumentSpreadsheet()
+
+            # Spalten-Styles für verschiedene Breiten
+            col_styles = []
+            col_widths = ["3cm", "8cm", "12cm", "6cm", "2cm", "3cm", "3cm", "8cm"]  # Spaltenbreiten
+
+            for i, width in enumerate(col_widths):
+                col_style = Style(name=f"col{i}", family="table-column")
+                col_style.addElement(TableColumnProperties(columnwidth=width))
+                doc.styles.addElement(col_style)
+                col_styles.append(col_style)
 
             # Styles für Kopfzeile erstellen
             header_style = Style(name="HeaderStyle", family="table-cell")
@@ -1177,6 +1187,11 @@ class EBibGUI:
             # Tabelle erstellen
             table = Table(name="eBib Suchergebnisse")
 
+            # Spalten mit Breiten definieren
+            for col_style in col_styles:
+                col = TableColumn(stylename=col_style)
+                table.addElement(col)
+
             # Kopfzeile
             headers = ["Datum", "Hyperlink", "Pfad", "Dateiname", "Extension", "Größe", "Datum", "MD5"]
             header_row = TableRow()
@@ -1188,15 +1203,9 @@ class EBibGUI:
 
             table.addElement(header_row)
 
-            # Kopfzeile fixieren
-            try:
-                from odf.table import TableHeaderRows
-                header_rows = TableHeaderRows()
-                header_rows.addElement(header_row)
-                table.addElement(header_rows)
-            except ImportError:
-                # Falls TableHeaderRows nicht verfügbar, normale Tabelle
-                pass
+            # WICHTIG: Kopfzeile als "wiederholte Zeile" markieren
+            # Das macht sie in LibreOffice fixiert
+            header_row.setAttribute("table:number-rows-repeated", "1")
 
             # Datenzeilen hinzufügen
             for row_data in self.found_rows:
