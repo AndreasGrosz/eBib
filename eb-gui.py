@@ -39,7 +39,7 @@ except ImportError:
             # Bestehende
             "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "mp2", "ra", "au", "mid", "midi",
             # Neue aus Analyse (besonders wichtig: frf mit 5.532 Dateien!)
-            "frf", "m3u", "ram", "aiff", "cda"
+            "frf", "m3u", "ram", "aiff", "cda", "rm"
         },
         "#graphik": {
             # Bestehende
@@ -66,7 +66,7 @@ except ImportError:
     sys.exit(1)
 
 # SQLite-DB für Performance
-SQLITE_DB = '/tmp/ebib_search.db'
+SQLITE_DB = Path.home() / 'Documents' / 'ebib_search.db'
 
 FIELD_MAP = {
     "datum": 0,
@@ -80,6 +80,73 @@ FIELD_ALIASES = {
     "dateiname": "name",
     "docdatum": "datum",
 }
+
+def check_and_build_sqlite_db():
+    """Prüft SQLite-DB und baut sie automatisch auf falls nötig"""
+    db_path = Path(SQLITE_DB)
+
+    print(f"[INFO] Prüfe SQLite-DB: {db_path}")
+
+    if not db_path.exists():
+        print(f"[INFO] SQLite-DB nicht gefunden, muss aufgebaut werden")
+        return False, True, 0
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM files")
+        record_count = cursor.fetchone()[0]
+        conn.close()
+
+        if record_count == 0:
+            print(f"[WARNING] SQLite-DB ist leer, muss neu aufgebaut werden")
+            return True, True, 0
+
+        print(f"[INFO] SQLite-DB OK: {record_count:,} Records")
+        return True, False, record_count
+
+    except Exception as e:
+        print(f"[ERROR] SQLite-DB defekt: {e}")
+        return True, True, 0
+
+def build_sqlite_db_async(callback=None):
+    """Baut SQLite-DB im Hintergrund auf"""
+    def build_process():
+        try:
+            print(f"[INFO] Starte SQLite-DB Aufbau...")
+
+            # Prüfe ob Preprocessor-Script existiert
+            preprocessor_script = Path(__file__).parent / 'csv-2-sqlite-conversion.py'
+            if not preprocessor_script.exists():
+                raise FileNotFoundError(f"csv-2-sqlite-conversion.py nicht gefunden")
+
+            # Rufe Preprocessor auf mit Umgebungsvariable für DB-Pfad
+            env = os.environ.copy()
+            env['EBIB_SQLITE_PATH'] = str(SQLITE_DB)
+
+            result = subprocess.run([
+                'python3', str(preprocessor_script)
+            ], input='1\n', text=True, capture_output=True, env=env)
+
+            if result.returncode == 0:
+                print(f"[SUCCESS] SQLite-DB erfolgreich erstellt: {SQLITE_DB}")
+                if callback:
+                    callback(True)
+            else:
+                print(f"[ERROR] Preprocessor fehlgeschlagen: {result.stderr}")
+                if callback:
+                    callback(False)
+
+        except Exception as e:
+            print(f"[ERROR] Fehler beim DB-Aufbau: {e}")
+            if callback:
+                callback(False)
+
+    thread = threading.Thread(target=build_process, daemon=True)
+    thread.start()
+    return thread
+
+
 
 class EBibGUI:
     def __init__(self, root):
@@ -115,14 +182,15 @@ class EBibGUI:
         # Neue Variable für Datums-Filter
         self.current_date_filter = None
 
-        # Lokaler Cache für bessere Performance (jetzt SQLite)
-        self.sqlite_db = SQLITE_DB
+        # SQLite-DB Management
+        self.sqlite_db = str(SQLITE_DB)
         self.db_ready = False
+        self.building_db = False
 
         self.setup_ui()
 
-        # SQLite-DB beim Start prüfen
-        self.init_sqlite_db()
+        # SQLite-DB beim Start prüfen und ggf. aufbauen
+        self.init_sqlite_with_auto_build()
 
     def setup_dark_theme(self):
         """Konfiguriert sehr dunkles Theme für bessere Lesbarkeit bei grauem Star"""
@@ -391,31 +459,59 @@ class EBibGUI:
         # Escape zum Stoppen
         self.root.bind('<Escape>', lambda e: self.stop_search() if self.search_running else None)
 
-    def init_sqlite_db(self):
-        """Prüft SQLite-DB beim Start"""
-        if not os.path.exists(self.sqlite_db):
-            self.status_label.config(text="❌ SQLite-DB nicht gefunden. Bitte erst ebib_preprocessor.py ausführen!")
-            self.db_ready = False
-            print(f"[ERROR] SQLite-DB nicht gefunden: {self.sqlite_db}")
-            print("Bitte führen Sie zuerst 'python ebib_preprocessor.py' aus!")
-            return
+    def init_sqlite_with_auto_build(self):
+        """SQLite-DB prüfen und automatisch aufbauen falls nötig"""
 
-        try:
-            # Test-Verbindung
-            conn = sqlite3.connect(self.sqlite_db)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM files")
-            record_count = cursor.fetchone()[0]
-            conn.close()
+        db_exists, needs_rebuild, record_count = check_and_build_sqlite_db()
 
+        if not needs_rebuild:
+            # DB ist bereit
             self.db_ready = True
             self.status_label.config(text=f"✅ SQLite-DB bereit - {record_count:,} Records für ultra-schnelle Suche")
-            print(f"[INFO] SQLite-DB geladen: {record_count:,} Records")
+            return
 
-        except Exception as e:
-            self.status_label.config(text=f"❌ SQLite-DB Fehler: {e}")
-            self.db_ready = False
-            print(f"[ERROR] SQLite-DB Fehler: {e}")
+        if self.building_db:
+            return  # Bereits im Aufbau
+
+        # DB muss aufgebaut werden
+        self.building_db = True
+        self.db_ready = False
+
+        if db_exists:
+            message = "🔄 SQLite-DB wird repariert - Suche läuft im Hintergrund..."
+        else:
+            message = "🔄 SQLite-DB wird erstellt - Dies kann einige Minuten dauern..."
+
+        self.status_label.config(text=message)
+        self.results_text.insert(tk.END, f"{message}\n")
+        self.results_text.insert(tk.END, f"💡 Sie können bereits suchen - TSV-Fallback ist aktiv\n\n")
+
+        # Starte DB-Aufbau im Hintergrund
+        def build_complete(success):
+            """Callback nach DB-Aufbau"""
+            self.building_db = False
+
+            if success:
+                # Prüfe neue DB
+                _, _, record_count = check_and_build_sqlite_db()
+                self.db_ready = True
+                self.root.after(0, lambda: self.status_label.config(
+                    text=f"✅ SQLite-DB aufgebaut - {record_count:,} Records - Ultra-schnelle Suche verfügbar!"
+                ))
+                self.root.after(0, lambda: self.results_text.insert(
+                    tk.END, f"🚀 SQLite-DB fertig - {record_count:,} Records - Nächste Suche wird ultra-schnell!\n\n"
+                ))
+            else:
+                self.root.after(0, lambda: self.status_label.config(
+                    text="❌ SQLite-DB Aufbau fehlgeschlagen - TSV-Fallback aktiv"
+                ))
+                self.root.after(0, lambda: self.results_text.insert(
+                    tk.END, "❌ SQLite-DB Aufbau fehlgeschlagen - verwende TSV-Suche\n\n"
+                ))
+
+        # Starte Aufbau
+        build_sqlite_db_async(build_complete)
+
 
     def search_sqlite(self, query, has_date_filter, has_type_filter):
         """Ultra-schnelle SQLite-Suche"""
@@ -1511,10 +1607,14 @@ class EBibGUI:
             messagebox.showerror("Fehler", error_msg)
             print(f"[ERROR] {error_msg}")
 
+# Am ENDE der eb-gui.py Datei hinzufügen:
 
 def main():
     """Hauptfunktion - startet die GUI"""
     try:
+        print("=== eBib GUI mit automatischem SQLite-Aufbau ===")
+        print(f"SQLite-DB Pfad: {SQLITE_DB}")
+
         root = tk.Tk()
         app = EBibGUI(root)
 
@@ -1526,6 +1626,7 @@ def main():
         print(f"SQLite-DB: {app.sqlite_db}")
 
         root.mainloop()
+
     except Exception as e:
         print(f"FEHLER beim Starten der GUI: {e}")
         import traceback

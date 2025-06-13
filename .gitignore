@@ -7,3 +7,4 @@ backups/
 # temporäre NFS-Dateien
 .nfs*
 .~*
+ebib_search.db
