@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+import sys
+import csv
+import subprocess
+from pathlib import Path
+import os
+import odf.opendocument
+from odf.table import Table, TableRow, TableCell, TableColumn
+from odf.text import P
+from odf.style import Style, TextProperties, TableColumnProperties
+import time
+import shlex
+
+# Configuration
+# INPUT_FILE = '/media/synology/files/projekte/kd0089 my eBib & DMS/Compare-n-Share/Kombi-ebib-RONSCH-v026.tsv'
+INPUT_FILE = '/media/synology/files/projekte/kd0089 my eBib & DMS/Compare-n-Share/s_250518-list-of-all-files-in-eBib-HDD-v032.tsv'
+OUTPUT_DIR = Path.home() / 'Downloads'
+
+def create_ods_with_hyperlinks(input_file, output_file, search_term):
+    print("Starte ODS-Erstellung...")
+    start_time = time.time()
+    doc = odf.opendocument.OpenDocumentSpreadsheet()
+
+    header_style = Style(name="Header", family="table-cell")
+    header_style.addElement(TextProperties(fontweight="bold"))
+    doc.styles.addElement(header_style)
+
+    hyperlink_style = Style(name="Hyperlink", family="text")
+    hyperlink_style.addElement(TextProperties(color="#0000FF", textunderlinestyle="solid", textunderlinewidth="auto"))
+    doc.styles.addElement(hyperlink_style)
+
+    table = Table(name="Sheet1")
+
+    # Individuelle Spaltenbreiten in cm (Spalten 0 bis 7)
+    column_widths = ["2.25cm", "2.25cm", "2.25cm", "12cm", "1cm", "2cm", "1cm", "2cm"]
+
+    # Für jede Spalte einen Stil mit eigener Breite definieren
+    for i, width in enumerate(column_widths):
+        col_style = Style(name=f"ColStyle{i}", family="table-column")
+        col_style.addElement(TableColumnProperties(columnwidth=width))
+        doc.automaticstyles.addElement(col_style)
+        table.addElement(TableColumn(stylename=col_style))
+
+
+    header = ["DocDatum", "Hyperlink", "Pfad", "Dateiname", "ext", "Grösse", "Datum", "md5"]
+    header_row = TableRow()
+    for cell_content in header:
+        cell = TableCell(stylename=header_style)
+        cell.addElement(P(text=cell_content))
+        header_row.addElement(cell)
+    table.addElement(header_row)
+
+    found_rows = []
+    row_count = 0
+    print("Verarbeite Zeilen...")
+    with open(input_file, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f, delimiter='\t')
+        for row in reader:
+            row_count += 1
+            if row_count % 1000 == 0:
+                print(f"Verarbeitet: {row_count} Zeilen")
+            if search_term.lower() in ' '.join(row).lower():
+                table_row = TableRow()
+                found_rows.append(row)
+
+                for i, cell_content in enumerate(row):
+                    cell = TableCell()
+
+                    if i == 1:  # Hyperlink column
+                        path = row[2]  # Pfad
+                        filename = row[3]  # Dateiname
+                        full_path = os.path.join(path, filename)
+                        href = f"file://{full_path}"
+                        p = P()
+                        p.addElement(odf.text.A(href=href, text=filename, stylename=hyperlink_style))
+                        cell.addElement(p)
+                    else:
+                        cell.addElement(P(text=cell_content))
+
+                    table_row.addElement(cell)
+
+                table.addElement(table_row)
+
+    doc.spreadsheet.addElement(table)
+    print(f"Speichere ODS-Datei: {output_file}")
+    doc.save(output_file)
+
+    end_time = time.time()
+    print(f"ODS-Erstellung abgeschlossen. Dauer: {end_time - start_time:.2f} Sekunden")
+    print(f"Gefundene Zeilen: {len(found_rows)}")
+    return found_rows
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: eb 'search term'")
+        sys.exit(1)
+
+    search_term = ' '.join(sys.argv[1:]).strip()
+    if not search_term:
+        print("Fehler: Der Suchbegriff darf nicht leer sein.")
+        sys.exit(1)
+
+    output_file = Path(OUTPUT_DIR) / 'ebib-search.ods'
+
+    # Grep-Befehl ausführen und Ausgabe in eine temporäre Datei speichern
+    temp_file = Path('/tmp/ebib-search-temp.tsv')
+
+    # Verwenden Sie shlex.quote(), um den Suchbegriff sicher zu escapen
+    escaped_search_term = shlex.quote(search_term)
+    grep_command = f"grep -i {escaped_search_term} '{INPUT_FILE}'"
+
+    print(f"Führe grep-Befehl aus: {grep_command}")
+    try:
+        start_time = time.time()
+        result = subprocess.run(grep_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        end_time = time.time()
+
+        # Speichern Sie die Ausgabe in der temporären Datei
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            f.write(result.stdout)
+
+        found_lines = result.stdout.count('\n')
+        print(f"grep-Befehl abgeschlossen. Dauer: {end_time - start_time:.2f} Sekunden")
+        print(f"Anzahl gefundener Zeilen: {found_lines}")
+
+        if found_lines == 0:
+            print(f"Keine Ergebnisse gefunden für '{search_term}'.")
+            sys.exit(0)
+
+    except subprocess.CalledProcessError as e:
+        if e.returncode == 1 and not e.stdout:
+            print(f"Keine Ergebnisse gefunden für '{search_term}'.")
+        else:
+            print(f"Fehler beim Ausführen des grep-Befehls: {e}")
+            print(f"Stderr: {e.stderr}")
+        sys.exit(1)
+
+    # ODS-Datei mit Hyperlinks erstellen und gefundene Zeilen zurückgeben
+    found_rows = create_ods_with_hyperlinks(temp_file, output_file, search_term)
+
+    print(f"Suchergebnisse gespeichert in {output_file}")
+
+    # Quickview der gefundenen Zeilen im Terminal ausgeben
+    print("\nQuickview der gefundenen Zeilen:")
+    for row in found_rows[:10]:  # Zeige nur die ersten 10 Zeilen
+        print(" | ".join(row))
+
+    if len(found_rows) > 10:
+        print(f"... und {len(found_rows) - 10} weitere Zeilen")
+        subprocess.Popen(["libreoffice", "--calc", str(output_file)])
+
+if __name__ == "__main__":
+    main()
+

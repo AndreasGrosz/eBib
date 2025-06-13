@@ -1,0 +1,43 @@
+file:///media/synology/eBib-HDD/eBib/AGs LRH-Daten,IngAG,1,AGs LRH-Daten
+file:///media/synology/eBib-HDD/eBib-shared/AndreasMbGross.ch,IngAG,1,AndreasMbGross.ch
+file:///media/synology/eBib-HDD/eBib/KSW-Library,KSW-Lib,7,KSW-Library
+file:///media/synology/eBib-HDD/eBib/KSW-Library - about it,KSW-Lib,7,KSW-Library - about it
+file:///media/synology/eBib-HDD/eBib-shared/Qual Library,Qual,4,Qual Library
+file:///media/synology/eBib-HDD/eBib/LRH TECH PRIMÄR,RONS,3,LRH TECH PRIMÄR
+file:///media/synology/eBib-HDD/eBib/New Materials by Max CH,RONS,3,New Materials by Max CH
+file:///media/synology/eBib-HDD/eBib/RonsOrgCH-2020,RONS,3,RonsOrgCH-2020
+file:///media/synology/eBib-HDD/eBib/RonsOrgCH-2021,RONS,3,RonsOrgCH-2021
+file:///media/synology/eBib-HDD/eBib-shared/Ron's Org Tech CD,RONS,3,Ron's Org Tech CD
+file:///media/synology/eBib-HDD/eBib-shared/Rons Org deutsche Referenzen,RONS,3,Rons Org deutsche Referenzen
+file:///media/synology/eBib-HDD/eBib-shared/STSS-Stiftung Materialien,RONS,3,STSS-Stiftung Materialien
+file:///media/synology/eBib-HDD/eBib/Cloud.ma1l.ru-Sc1entology Arch1ve,sonstige,2,Cloud.ma1l.ru-Sc1entology Arch1ve
+file:///media/synology/eBib-HDD/eBib/Galac Patra 0-48.com,sonstige,2,Galac Patra 0-48.com
+file:///media/synology/eBib-HDD/eBib/LRHmaterials.com,sonstige,2,LRHmaterials.com
+file:///media/synology/eBib-HDD/eBib/LRHMaterials.com-2,sonstige,2,LRHMaterials.com-2
+file:///media/synology/eBib-HDD/eBib/Maxim,sonstige,2,Maxim
+file:///media/synology/eBib-HDD/eBib/Naveed,sonstige,2,Naveed
+file:///media/synology/eBib-HDD/eBib/Russland2007,sonstige,2,Russland2007
+file:///media/synology/eBib-HDD/eBib/ScnTech-Russian,sonstige,2,ScnTech-Russian
+file:///media/synology/eBib-HDD/eBib/single-pages-of-Volumes,sonstige,2,single-pages-of-Volumes
+file:///media/synology/eBib-HDD/eBib-shared/antology.info,sonstige,2,antology.info
+file:///media/synology/eBib-HDD/eBib-shared/C0mpl3te L1br4ry of LRH DE-FR-IT-ES,sonstige,2,C0mpl3te L1br4ry of LRH DE-FR-IT-ES
+file:///media/synology/eBib-HDD/eBib-shared/C0mpl3te L1br4ry of LRH EN,sonstige,2,C0mpl3te L1br4ry of LRH EN
+file:///media/synology/eBib-HDD/eBib-shared/Clear Tech Lib,sonstige,2,Clear Tech Lib
+file:///media/synology/eBib-HDD/eBib-shared/DH,sonstige,2,DH
+file:///media/synology/eBib-HDD/eBib-shared/EPOC,sonstige,2,EPOC
+file:///media/synology/eBib-HDD/eBib-shared/F00tballC4n4d4,sonstige,2,F00tballC4n4d4
+file:///media/synology/eBib-HDD/eBib-shared/forward,sonstige,2,forward
+file:///media/synology/eBib-HDD/eBib-shared/FZint,sonstige,2,FZint
+file:///media/synology/eBib-HDD/eBib-shared/Genesis,sonstige,2,Genesis
+file:///media/synology/eBib-HDD/eBib-shared/Greek,sonstige,2,Greek
+file:///media/synology/eBib-HDD/eBib-shared/IFA,sonstige,2,IFA
+file:///media/synology/eBib-HDD/eBib-shared/PLs deutsch,sonstige,2,PLs deutsch
+file:///media/synology/eBib-HDD/eBib-shared/R151NG PH0EN1X,sonstige,2,R151NG PH0EN1X
+file:///media/synology/eBib-HDD/eBib-shared/scientolipedia.org,sonstige,2,scientolipedia.org
+file:///media/synology/eBib-HDD/eBib-shared/Scientology Early Editions,sonstige,2,Scientology Early Editions
+file:///media/synology/eBib-HDD/eBib-shared/Sirius,sonstige,2,Sirius
+file:///media/synology/eBib-HDD/eBib-shared/Tech Lovers Sammlung,sonstige,2,Tech Lovers Sammlung
+file:///media/synology/eBib-HDD/eBib-shared/Videos,Videos,5,Videos
+file:///media/synology/eBib-HDD/eBib/DownloadedWebsites,Websites,6,DownloadedWebsites
+file:///media/synology/eBib-HDD/eBib/DownloadedWebsites2,Websites,6,DownloadedWebsites2
+file:///media/synology/eBib-HDD/eBib/File.wikileaks.org-file,Websites,6,File.wikileaks.org-file
